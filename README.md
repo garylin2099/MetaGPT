@@ -1,13 +1,4 @@
-
-# MetaGPT: The Multi-Agent Framework
-
-<p align="center">
-<a href=""><img src="docs/resources/MetaGPT-new-log.png" alt="MetaGPT logo: Enable GPT to work in software company, collaborating to tackle more complex tasks." width="150px"></a>
-</p>
-
-<p align="center">
-<b>Assign different roles to GPTs to form a collaborative software entity for complex tasks.</b>
-</p>
+abc
 
 <p align="center">
 <a href="docs/README_CN.md"><img src="https://img.shields.io/badge/文档-中文版-blue.svg" alt="CN doc"></a>
