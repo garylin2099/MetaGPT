@@ -12,6 +12,8 @@ from metagpt.tools.libs import (
     web_scraping,
     email_login,
     terminal,
+    file_manager,
+    browser,
 )
 
 _ = (
@@ -22,4 +24,6 @@ _ = (
     web_scraping,
     email_login,
     terminal,
+    file_manager,
+    browser,
 )  # Avoid pre-commit error
