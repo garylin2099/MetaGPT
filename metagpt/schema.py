@@ -45,7 +45,7 @@ from metagpt.const import (
     SYSTEM_DESIGN_FILE_REPO,
     TASK_FILE_REPO,
 )
-from metagpt.logs import logger
+from metagpt.logs import ToolLogItem, log_tool_output, logger
 from metagpt.repo_parser import DotClassInfo
 from metagpt.utils.common import any_to_str, any_to_str_set, import_class
 from metagpt.utils.exceptions import handle_exception
@@ -476,6 +476,8 @@ class Plan(BaseModel):
             if new_task.task_id in task.dependent_task_ids:
                 self.reset_task(task.task_id)
 
+        self._update_current_task()
+
     def append_task(self, new_task: Task):
         """
         Append a new task to the end of existing task sequences
@@ -506,7 +508,15 @@ class Plan(BaseModel):
             if not task.is_finished:
                 current_task_id = task.task_id
                 break
-        self.current_task_id = current_task_id  # all tasks finished
+        self.current_task_id = current_task_id
+
+        log_tool_output(
+            [
+                ToolLogItem(type="object", name="tasks", value=self.tasks),
+                ToolLogItem(type="object", name="current_task_id", value=self.current_task_id),
+            ],
+            tool_name="Plan",
+        )
 
     @property
     def current_task(self) -> Task:
