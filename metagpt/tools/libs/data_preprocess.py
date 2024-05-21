@@ -218,22 +218,22 @@ class LabelEncode(DataPreprocessTool):
         return new_df
 
 
-def get_column_info(df: pd.DataFrame) -> dict:
+def get_column_info(df: pd.DataFrame, max_cols=10) -> str:
     """
     Analyzes a DataFrame and categorizes its columns based on data types.
 
     Args:
         df (pd.DataFrame): The DataFrame to be analyzed.
+        max_cols (int, optional): The maximum number of columns to show for each category. Defaults to 10.
 
     Returns:
-        dict: A dictionary with four keys ('Category', 'Numeric', 'Datetime', 'Others').
-              Each key corresponds to a list of column names belonging to that category.
+        str: The formatted column info.
     """
     column_info = {
         "Category": [],
         "Numeric": [],
         "Datetime": [],
-        "Others": [],
+        "Other": [],
     }
     for col in df.columns:
         data_type = str(df[col].dtype).replace("dtype('", "").replace("')", "")
@@ -244,8 +244,80 @@ def get_column_info(df: pd.DataFrame) -> dict:
         elif data_type.startswith("datetime"):
             column_info["Datetime"].append(col)
         else:
-            column_info["Others"].append(col)
+            column_info["Other"].append(col)
 
-    if len(json.dumps(column_info)) > 2000:
-        column_info["Numeric"] = column_info["Numeric"][0:5] + ["Too many cols, omission here..."]
-    return column_info
+    result = []
+    for key, value in column_info.items():
+        col_count = len(value)
+        if col_count > max_cols:
+            displayed_cols = value[:max_cols]
+            result.append(f"{key} Columns (Only show {max_cols} of {col_count}): {', '.join(displayed_cols)}, ...")
+        else:
+            result.append(f"{key} Columns ({col_count} columns): {', '.join(value)}")
+
+    info = f"Number of Rows: {len(df)}\nNumber of Columns: {len(df.columns)}\n\n" + "\n".join(result)
+    return info
+
+
+def get_data_info(train_path, target):
+    train_data = pd.read_csv(train_path)
+    num_rows, num_cols = train_data.shape
+    missing_values_info = train_data.isnull().sum() / len(train_data) * 100
+
+    numeric_features = train_data.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_features = train_data.select_dtypes(include=[object]).columns.tolist()
+
+    unique_values = train_data[target].nunique()
+
+    if unique_values <= 10:
+        target_info = train_data[target].value_counts().to_dict()
+        target_info_str = "Value Counts:\n" + "\n".join([f"{val}: {count}" for val, count in target_info.items()])
+    else:
+        target_info = train_data[target].describe().to_dict()
+        target_info_str = "Description:\n" + "\n".join([f"{key}: {val}" for key, val in target_info.items()])
+
+    if target in numeric_features:
+        numeric_features.remove(target)
+    if target in categorical_features:
+        categorical_features.remove(target)
+
+    display_columns = 10
+    numeric_features_str = "\n".join(
+        [f"{col:<20} {missing_values_info[col]:.2f}%" for col in numeric_features[:display_columns]])
+
+    categorical_features_info = {}
+    for col in categorical_features[:display_columns]:
+        unique_values = train_data[col].nunique()
+        top_values = train_data[col].value_counts().head(5).to_dict()
+        top_values_str = ", ".join([f"{k}: {v}" for k, v in top_values.items()])
+        categorical_features_info[col] = {
+            'missing_rate': missing_values_info[col],
+            'unique_values': unique_values,
+            'top_values': top_values_str
+        }
+
+    categorical_features_str = "\n".join([
+        f"{col:<20} {categorical_features_info[col]['missing_rate']:>6.2f}%    {categorical_features_info[col]['unique_values']:<10} {categorical_features_info[col]['top_values']}"
+        for col in categorical_features[:display_columns]
+    ])
+
+    data_info = f"""
+## Basic Info:
+Number of Rows: {num_rows}
+Number of Columns: {num_cols}
+
+## Numeric Features (Only show first {min(display_columns, len(numeric_features))} of {len(numeric_features)}):
+Column_Name        Missing_Rate
+{numeric_features_str}
+{"..." if len(numeric_features) > display_columns else ""}
+
+## Categorical Features (Only show first {min(display_columns, len(categorical_features))} of {len(categorical_features)}):
+Column_Name        Missing_Rate     N_unique   Top5_Value_Counts
+{categorical_features_str}
+{"..." if len(categorical_features) > display_columns else ""}
+
+## Target ({target}) Info:
+{target_info_str}
+"""
+
+    return data_info

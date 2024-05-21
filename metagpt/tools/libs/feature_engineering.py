@@ -26,7 +26,7 @@ TAGS = ["feature engineering", "machine learning"]
 @register_tool(tags=TAGS)
 class PolynomialExpansion(MLProcess):
     """
-    Add polynomial and interaction features from selected numeric columns to input DataFrame.
+    Add PolynomialFeatures and concatenate the result to the input DataFrame.
     """
 
     def __init__(self, cols: list, label_col: str, degree: int = 2):
@@ -46,6 +46,7 @@ class PolynomialExpansion(MLProcess):
         self.poly = PolynomialFeatures(degree=degree, include_bias=False)
 
     def fit(self, df: pd.DataFrame):
+        self.cols = [col for col in self.cols if col in df.columns]
         if len(self.cols) == 0:
             return
         if len(self.cols) > 10:
@@ -69,7 +70,7 @@ class PolynomialExpansion(MLProcess):
 @register_tool(tags=TAGS)
 class CatCount(MLProcess):
     """
-    Add value counts of a categorical column as new feature.
+    Add value counts of a categorical column as new feature and concatenate it to the input DataFrame.
     """
 
     def __init__(self, col: str):
@@ -94,7 +95,7 @@ class CatCount(MLProcess):
 @register_tool(tags=TAGS)
 class TargetMeanEncoder(MLProcess):
     """
-    Encode a categorical column by the mean of the label column, and adds the result as a new feature.
+    Encode a categorical column by the mean of the label column, and add it to the input DataFrame.
     """
 
     def __init__(self, col: str, label: str):
@@ -161,7 +162,7 @@ class KFoldTargetMeanEncoder(MLProcess):
 @register_tool(tags=TAGS)
 class CatCross(MLProcess):
     """
-    Add pairwise crossed features and convert them to numerical features.
+    Add pairwise crossed features, convert them to numerical, and concatenate them to the input DataFrame.
     """
 
     def __init__(self, cols: list, max_cat_num: int = 100):
@@ -189,7 +190,7 @@ class CatCross(MLProcess):
         Returns:
             tuple: The new column name and the crossed feature map.
         """
-        new_col = f"{comb[0]}_{comb[1]}"
+        new_col = f"{comb[0]}_{comb[1]}_cross"
         new_col_combs = list(itertools.product(df[comb[0]].unique(), df[comb[1]].unique()))
         ll = list(range(len(new_col_combs)))
         comb_map = dict(zip(new_col_combs, ll))
@@ -206,7 +207,7 @@ class CatCross(MLProcess):
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         new_df = df.copy()
         for comb in self.combs:
-            new_col = f"{comb[0]}_{comb[1]}"
+            new_col = f"{comb[0]}_{comb[1]}_cross"
             _map = self.combs_map[new_col]
             new_df[new_col] = pd.Series(zip(new_df[comb[0]], new_df[comb[1]])).map(_map)
             # set the unknown value to a new number
@@ -321,12 +322,11 @@ class GeneralSelection(MLProcess):
     Drop all nan feats and feats with only one unique value.
     """
 
-    def __init__(self, label_col: str):
-        self.label_col = label_col
+    def __init__(self):
         self.feats = []
 
     def fit(self, df: pd.DataFrame):
-        feats = [f for f in df.columns if f != self.label_col]
+        feats = df.columns.tolist()
         for col in df.columns:
             if df[col].isnull().sum() / df.shape[0] == 1:
                 feats.remove(col)
@@ -343,7 +343,7 @@ class GeneralSelection(MLProcess):
         self.feats = feats
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        new_df = df[self.feats + [self.label_col]]
+        new_df = df[self.feats]
         return new_df
 
 
@@ -408,27 +408,24 @@ class VarianceBasedSelection(MLProcess):
     Select features based on variance and remove features with low variance.
     """
 
-    def __init__(self, label_col: str, threshold: float = 0):
+    def __init__(self, threshold: float = 0):
         """
         Initialize self.
 
         Args:
-            label_col (str): Label column name.
             threshold (float, optional): Threshold for variance. Defaults to 0.
         """
-        self.label_col = label_col
         self.threshold = threshold
-        self.feats = None
+        self.drop_cols = None
         self.selector = VarianceThreshold(threshold=self.threshold)
 
     def fit(self, df: pd.DataFrame):
         num_cols = df.select_dtypes(include=np.number).columns.tolist()
-        cols = [f for f in num_cols if f not in [self.label_col]]
 
-        self.selector.fit(df[cols])
-        self.feats = df[cols].columns[self.selector.get_support(indices=True)].tolist()
-        self.feats.append(self.label_col)
+        self.selector.fit(df[num_cols])
+        feats = df[num_cols].columns[self.selector.get_support(indices=True)].tolist()
+        self.drop_cols = [col for col in num_cols if col not in feats]
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        new_df = df[self.feats]
+        new_df = df.drop(self.drop_cols, axis=1)
         return new_df
