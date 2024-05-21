@@ -14,6 +14,7 @@ STRUCTUAL_PROMPT = """
 - Take on Current Task if it is in Plan Status, otherwise, tackle User Requirement directly.
 - Ensure the output new code is executable in the same Jupyter notebook as the previous executed code.
 - Always prioritize using pre-defined tools for the same functionality.
+- Print only key variables to guide the following actions, do not output any intermediate logs. Such as set with `verbose=False` or other similar parameters.
 
 # Output
 While some concise thoughts are helpful, code is absolutely required. Always output one and only one code block in your response. Output code in the following format:
@@ -90,14 +91,13 @@ Specifically, if it is a data analysis or machine learning task, print the the l
 from metagpt.tools.libs.data_preprocess import get_column_info
 
 column_info = get_column_info(df)
-print("column_info")
 print(column_info)
 ```end
 Otherwise, print out any key variables you see fit. Return an empty string if you think there is no important data to check.
 
 # Constraints:
 - Your code is to be added to a new cell in jupyter.
-
+- If train and test data are available, print only the train data information.
 # Instruction
 Output code following the format:
 ```python

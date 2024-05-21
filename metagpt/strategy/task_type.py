@@ -9,6 +9,7 @@ from metagpt.prompts.task_type import (
     IMAGE2WEBPAGE_PROMPT,
     MODEL_EVALUATE_PROMPT,
     MODEL_TRAIN_PROMPT,
+    MODEL_ENSEMBLE_PROMPT,
 )
 
 
@@ -46,6 +47,11 @@ class TaskType(Enum):
         name="model evaluate",
         desc="Only for evaluating model.",
         guidance=MODEL_EVALUATE_PROMPT,
+    )
+    MODEL_ENSEMBLE = TaskTypeDef(
+        name="model ensemble",
+        desc="Only for ensemble model.",
+        guidance=MODEL_ENSEMBLE_PROMPT,
     )
     IMAGE2WEBPAGE = TaskTypeDef(
         name="image2webpage",

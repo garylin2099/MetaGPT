@@ -34,7 +34,7 @@ from metagpt.context_mixin import ContextMixin
 from metagpt.logs import logger
 from metagpt.memory import Memory
 from metagpt.provider import HumanProvider
-from metagpt.schema import Message, MessageQueue, SerializationMixin
+from metagpt.schema import Message, MessageQueue, SerializationMixin, Task, TaskResult
 from metagpt.strategy.planner import Planner
 from metagpt.utils.common import any_to_name, any_to_str, role_raise_decorator
 from metagpt.utils.project_repo import ProjectRepo
@@ -283,7 +283,7 @@ class Role(SerializationMixin, ContextMixin, BaseModel):
             self.actions.append(i)
             self.states.append(f"{len(self.actions) - 1}. {action}")
 
-    def _set_react_mode(self, react_mode: str, max_react_loop: int = 1, auto_run: bool = True):
+    def _set_react_mode(self, react_mode: str, max_react_loop: int = 1, auto_run: bool = True, **kwargs):
         """Set strategy of the Role reacting to observed Message. Variation lies in how
         this Role elects action to perform during the _think stage, especially if it is capable of multiple Actions.
 
@@ -304,7 +304,16 @@ class Role(SerializationMixin, ContextMixin, BaseModel):
         if react_mode == RoleReactMode.REACT:
             self.rc.max_react_loop = max_react_loop
         elif react_mode == RoleReactMode.PLAN_AND_ACT:
-            self.planner = Planner(goal=self.goal, working_memory=self.rc.working_memory, auto_run=auto_run)
+            self.planner = Planner(
+                goal=self.goal,
+                working_memory=self.rc.working_memory,
+                auto_run=auto_run,
+                role_id=self.role_id,
+                **kwargs
+            )
+            # loaded_planner = Planner.load_state(self.role_id)
+            # if loaded_planner:
+            #     self.planner = loaded_planner
 
     def _watch(self, actions: Iterable[Type[Action]] | Iterable[Action]):
         """Watch Actions of interest. Role will select Messages caused by these Actions from its personal message
@@ -485,8 +494,16 @@ class Role(SerializationMixin, ContextMixin, BaseModel):
         # create initial plan and update it until confirmation
         goal = self.rc.memory.get()[-1].content  # retreive latest user requirement
         await self.planner.update_plan(goal=goal)
-
         # take on tasks until all finished
+        await self._act_on_tasks()
+
+        rsp = self.planner.get_useful_memories()[0]  # return the completed plan as a response
+
+        self.rc.memory.add(rsp)  # add to persistent memory
+
+        return rsp
+
+    async def _act_on_tasks(self, current_iter: int = 0):
         while self.planner.current_task:
             task = self.planner.current_task
             logger.info(f"ready to take on task {task}")
@@ -495,13 +512,7 @@ class Role(SerializationMixin, ContextMixin, BaseModel):
             task_result = await self._act_on_task(task)
 
             # process the result, such as reviewing, confirming, plan updating
-            await self.planner.process_task_result(task_result)
-
-        rsp = self.planner.get_useful_memories()[0]  # return the completed plan as a response
-
-        self.rc.memory.add(rsp)  # add to persistent memory
-
-        return rsp
+            await self.planner.process_task_result(task_result, current_iter=current_iter)
 
     async def _act_on_task(self, current_task: Task) -> TaskResult:
         """Taking specific action to handle one task in plan

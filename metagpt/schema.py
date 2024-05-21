@@ -339,6 +339,7 @@ class Task(BaseModel):
     result: str = ""
     is_success: bool = False
     is_finished: bool = False
+    exp_iteration: int = 0
 
     def reset(self):
         self.code = ""
