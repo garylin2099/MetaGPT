@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Literal
 
 import numpy as np
@@ -160,7 +159,7 @@ class OrdinalEncode(DataPreprocessTool):
 
     def __init__(self, features: list):
         self.features = features
-        self.model = OrdinalEncoder()
+        self.model = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
 
 
 @register_tool(tags=TAGS)
