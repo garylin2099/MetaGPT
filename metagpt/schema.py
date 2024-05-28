@@ -330,6 +330,62 @@ class AIMessage(Message):
         super().__init__(content=content, role="assistant")
 
 
+class EvaluationResult(BaseModel):
+    exp_iteration: int
+    metric: str
+    is_lower_better: bool
+    score: float
+    task_id: str
+    improve_thought: str = ""
+    is_improved: Optional[bool] = None
+
+
+class Evaluations(BaseModel):
+    evaluations: List[EvaluationResult] = Field(default_factory=list)
+
+    def add_evaluation(self, result: EvaluationResult):
+        if self.evaluations:
+            if result.is_lower_better:
+                best_evaluation = min(self.evaluations, key=lambda x: x.score)
+                result.is_improved = result.score < best_evaluation.score
+            else:
+                best_evaluation = max(self.evaluations, key=lambda x: x.score)
+                result.is_improved = result.score > best_evaluation.score
+        else:
+            result.is_improved = True  # The first iteration is always improved
+        self.evaluations.append(result)
+
+    def find_best_tasks(self, tasks: List[Task]) -> List[Task]:
+        task_map: Dict[int, List[Task]] = {}
+        for task in tasks:
+            if task.exp_iteration not in task_map:
+                task_map[task.exp_iteration] = []
+            task_map[task.exp_iteration].append(task)
+
+        best_tasks = []
+        improved_iterations = [e.exp_iteration for e in self.evaluations if e.is_improved]
+
+        end_task_id = None
+        for result in self.evaluations:
+            if result.exp_iteration == max(improved_iterations):
+                end_task_id = result.task_id
+
+        for iteration in sorted(task_map.keys()):
+            if iteration in improved_iterations:
+                for task in task_map[iteration]:
+                    best_tasks.append(task)
+                    if task.task_id == end_task_id:
+                        break
+        return best_tasks
+
+    def ineffective_thoughts(self):
+        ineffective_thoughts = [
+            t.model_dump(exclude={"metric", "is_lower_better", "is_improved"})
+            for t in self.evaluations if not t.is_improved
+        ]
+        return ineffective_thoughts
+
+
 class Task(BaseModel):
     task_id: str = ""
     dependent_task_ids: list[str] = []  # Tasks prerequisite to this Task
@@ -516,12 +572,14 @@ class Plan(BaseModel):
             self.current_task.is_finished = True
             self._update_current_task()  # set to next task
 
-    def get_finished_tasks(self) -> list[Task]:
+    def get_finished_tasks(self, iteration: int = None) -> list[Task]:
         """return all finished tasks in correct linearized order
 
         Returns:
             list[Task]: list of finished tasks
         """
+        if iteration:
+            return [task for task in self.tasks if task.is_finished and task.exp_iteration == iteration]
         return [task for task in self.tasks if task.is_finished]
 
 

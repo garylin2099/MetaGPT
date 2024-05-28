@@ -1,24 +1,23 @@
 from __future__ import annotations
 
 import json
-import uuid
+import traceback
 from typing import Literal
 
 from pydantic import Field, model_validator
 
 from metagpt.actions.di.ask_review import ReviewConst
 from metagpt.actions.di.execute_nb_code import ExecuteNbCode
+from metagpt.actions.di.experiment_evaluator import ExperimentEvaluator
 from metagpt.actions.di.write_analysis_code import CheckData, WriteAnalysisCode
 from metagpt.logs import logger
 from metagpt.prompts.di.write_analysis_code import DATA_INFO
 from metagpt.roles import Role
-from metagpt.schema import Message, Task, TaskResult
-from metagpt.strategy.knowledge_manager import knowledge_manager
+from metagpt.schema import Message, Task, TaskResult, EvaluationResult, Evaluations, Plan
 from metagpt.strategy.planner import Planner
 from metagpt.strategy.task_type import TaskType
 from metagpt.tools.tool_recommend import BM25ToolRecommender, ToolRecommender
 from metagpt.utils.common import CodeParser
-from metagpt.utils.save_code import save_code_file
 
 REACT_THINK_PROMPT = """
 # User Requirement
@@ -45,7 +44,6 @@ warnings.filterwarnings('ignore')"""
 
 class DataInterpreter(Role):
     name: str = "David"
-    role_id: str = str(uuid.uuid4())
     profile: str = "DataInterpreter"
     auto_run: bool = True
     use_plan: bool = True
@@ -60,8 +58,9 @@ class DataInterpreter(Role):
     task_with_knowledge: bool = False
     optimize_with_knowledge: bool = False
     knowledge_rerank: bool = False
-    max_optimize_iter: int = 1
+    max_optimize_iter: int = 0
     current_optimize_iter: int = 0
+    evaluations: Evaluations = Field(default_factory=Evaluations, exclude=True)
 
     @model_validator(mode="after")
     def set_plan_and_tool(self) -> "Interpreter":
@@ -118,7 +117,9 @@ class DataInterpreter(Role):
             if not hasattr(self.planner, 'plan') or not self.planner.plan.tasks:
                 await self.execute_code.run(INI_CODE)
                 await super()._plan_and_act()
-            while self.current_optimize_iter < self.max_optimize_iter:
+                await self._evaluate_experiment()
+                self.current_optimize_iter += 1
+            while self.current_optimize_iter <= self.max_optimize_iter:
                 await self._optimize_and_act(max_retries=3)
             rsp = self.planner.get_useful_memories()[0]
             return rsp
@@ -131,6 +132,13 @@ class DataInterpreter(Role):
         finally:
             await self.execute_code.terminate()
 
+    async def _evaluate_experiment(self, current_iter: int = 0, thought: str = ""):
+        rsp = await ExperimentEvaluator().run(self.planner.plan, current_iter)
+        rsp["improve_thought"] = thought
+        if rsp["score"]:
+            evaluation_result = EvaluationResult(**rsp)
+            self.evaluations.add_evaluation(evaluation_result)
+
     async def _optimize_and_act(self, max_retries: int = 3):
         retries = 0
         iteration_success = False
@@ -138,14 +146,19 @@ class DataInterpreter(Role):
         while retries < max_retries:
             try:
                 logger.info(f"Optimizing experiment for the {self.current_optimize_iter}th time:")
-                await self.planner.optimize_plan(iteration=self.current_optimize_iter)
+                thought = await self.planner.optimize_plan(
+                    iteration=self.current_optimize_iter,
+                    evaluations=self.evaluations
+                )
                 await self._act_on_tasks(current_iter=self.current_optimize_iter)
+                await self._evaluate_experiment(current_iter=self.current_optimize_iter, thought=thought)
                 iteration_success = True
                 self.planner.save_state()
                 logger.info(f"Experiment {self.current_optimize_iter} completed.")
                 break
             except Exception as e:
                 logger.error(f"Experiment {self.current_optimize_iter} failed: {e} for the {retries}th time.")
+                logger.error(traceback.format_exc())
                 retries += 1
                 self.planner = planner_snapshot
         if not iteration_success:
@@ -167,7 +180,9 @@ class DataInterpreter(Role):
         success = False
 
         # plan info
-        plan_status = self.planner.get_plan_status() if self.use_plan else ""
+        plan_status = self.planner.get_plan_status(
+            self.current_optimize_iter, self.evaluations
+        ) if self.use_plan else ""
 
         # tool info
         if self.tool_recommender:
@@ -184,6 +199,7 @@ class DataInterpreter(Role):
         self.planner.column_info = column_info if column_info else self.planner.column_info
 
         while not success and counter < max_retry:
+            logger.info(f"Writing code for the {counter}th time.")
             ### write code ###
             code, cause_by = await self._write_code(counter, plan_status, tool_info)
 
@@ -236,12 +252,13 @@ class DataInterpreter(Role):
             not in [
                 TaskType.DATA_PREPROCESS.type_name,
                 TaskType.FEATURE_ENGINEERING.type_name,
+                TaskType.MODEL_PREPROCESS.type_name,
                 TaskType.MODEL_TRAIN.type_name,
             ]
         ):
             return ""
         logger.info("Check updated data")
-        code = await CheckData().run(self.planner.plan)
+        code = await CheckData().run(self.planner, self.current_optimize_iter, self.evaluations)
         if not code.strip():
             return ""
         result, success = await self.execute_code.run(code)

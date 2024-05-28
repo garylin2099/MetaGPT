@@ -17,7 +17,8 @@ from metagpt.prompts.di.write_analysis_code import (
     REFLECTION_SYSTEM_MSG,
     STRUCTUAL_PROMPT,
 )
-from metagpt.schema import Message, Plan
+from metagpt.schema import Message, Evaluations
+from metagpt.strategy.planner import Planner
 from metagpt.utils.common import CodeParser, process_message, remove_comments
 
 
@@ -63,8 +64,8 @@ class WriteAnalysisCode(Action):
 
 
 class CheckData(Action):
-    async def run(self, plan: Plan) -> dict:
-        finished_tasks = plan.get_finished_tasks()
+    async def run(self, planner: Planner, current_iter: int = 0, evaluations: Evaluations = None) -> dict:
+        finished_tasks = planner.get_finished_tasks(current_iter, evaluations)
         code_written = [remove_comments(task.code) for task in finished_tasks]
         code_written = "\n\n".join(code_written)
         prompt = CHECK_DATA_PROMPT.format(code_written=code_written)

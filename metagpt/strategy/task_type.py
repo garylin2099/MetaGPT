@@ -29,25 +29,30 @@ class TaskType(Enum):
     )
     DATA_PREPROCESS = TaskTypeDef(
         name="data preprocessing",
-        desc="For preprocessing dataset in a data analysis or machine learning task ONLY,"
-        "general data operation doesn't fall into this type",
+        desc="Only for preprocessing the data before creating new features."
+        "general data operation such as scaling and encoding never include.",
         guidance=DATA_PREPROCESS_PROMPT,
     )
     FEATURE_ENGINEERING = TaskTypeDef(
         name="feature engineering",
-        desc="Only for creating new columns for input data.",
+        desc="Only for creating new columns for input data, never include scaling or encoding.",
         guidance=FEATURE_ENGINEERING_PROMPT,
+    )
+    MODEL_PREPROCESS = TaskTypeDef(
+        name="model preprocessing",
+        desc="For preprocessing the data to ensure model training, such as scaling and encoding.",
+        guidance="",
     )
     MODEL_TRAIN = TaskTypeDef(
         name="model train",
-        desc="Only for training model.",
+        desc="For training and evaluating model together in one task.",
         guidance=MODEL_TRAIN_PROMPT,
     )
-    MODEL_EVALUATE = TaskTypeDef(
-        name="model evaluate",
-        desc="Only for evaluating model.",
-        guidance=MODEL_EVALUATE_PROMPT,
-    )
+    # MODEL_EVALUATE = TaskTypeDef(
+    #     name="model evaluate",
+    #     desc="Only for evaluating model.",
+    #     guidance=MODEL_EVALUATE_PROMPT,
+    # )
     MODEL_ENSEMBLE = TaskTypeDef(
         name="model ensemble",
         desc="Only for ensemble model.",

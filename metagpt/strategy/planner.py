@@ -4,7 +4,6 @@ import json
 import os
 import pickle
 
-import pandas as pd
 from pydantic import BaseModel, Field
 
 from metagpt.actions.di.ask_review import AskReview, ReviewConst
@@ -18,11 +17,10 @@ from metagpt.actions.di.write_plan import (
 from metagpt.const import PLANNER_PATH
 from metagpt.logs import logger
 from metagpt.memory import Memory
-from metagpt.schema import Message, Plan, Task, TaskResult
+from metagpt.schema import Message, Plan, Task, TaskResult, Evaluations
 from metagpt.strategy.knowledge_manager import knowledge_manager, KnowledgeManager
 from metagpt.strategy.task_type import TaskType
-from metagpt.tools.libs.data_preprocess import get_column_info
-from metagpt.utils.common import remove_comments, CodeParser
+from metagpt.utils.common import remove_comments
 
 STRUCTURAL_CONTEXT = """
 ## User Requirement
@@ -137,17 +135,25 @@ class Planner(BaseModel):
                 self.knowledge = '\n'.join([f"- {k.knowledge}" for k in knowledge])
             logger.info(f"Knowledge Pool: \n{self.knowledge}")
 
-    async def optimize_plan(self, iteration: int):
-        rsp = await SolutionOptimizer().run(self.plan, self.knowledge, self.column_info)
-        logger.info(f"Solution Optimizer response: \n{rsp}")
-        rsp = CodeParser.parse_code(block='', text=rsp)
-        rsp = json.loads(rsp)
-        tasks = [Task(**task_config) for task_config in rsp]
-        tasks = [task.model_copy(update={"exp_iteration": iteration}) for task in tasks]
-        for task in tasks:
+    async def optimize_plan(self, iteration: int, evaluations: Evaluations):
+        thought, new_tasks = await SolutionOptimizer().run(
+            self.plan,
+            self.knowledge,
+            self.column_info,
+            iteration,
+            evaluations
+        )
+        new_tasks = [Task(**task_config) for task_config in new_tasks]
+        new_tasks = [task.model_copy(update={"exp_iteration": iteration}) for task in new_tasks]
+        for task in new_tasks:
             self.plan.append_task(task)
+        return thought
 
-    async def process_task_result(self, task_result: TaskResult, current_iter: int = 0):
+    async def process_task_result(
+        self,
+        task_result: TaskResult,
+        current_iter: int = 0,
+    ):
         # ask for acceptance, users can other refuse and change tasks in the plan
         review, task_result_confirmed = await self.ask_review(task_result)
 
@@ -165,7 +171,7 @@ class Planner(BaseModel):
                 # update plan according to user's feedback and to take on changed tasks
                 await self.update_plan()
             else:
-                await self.optimize_plan(current_iter)
+                raise NotImplementedError("Not implemented for current iteration > 0")
 
     async def ask_review(
         self,
@@ -217,9 +223,9 @@ class Planner(BaseModel):
 
         return context_msg + self.working_memory.get()
 
-    def get_plan_status(self) -> str:
+    def get_plan_status(self, current_iter: int = 0, evaluations: Evaluations = None) -> str:
         # prepare components of a plan status
-        finished_tasks = self.plan.get_finished_tasks()
+        finished_tasks = self.get_finished_tasks(current_iter, evaluations)
         code_written = [remove_comments(task.code) for task in finished_tasks]
         code_written = "\n\n".join(code_written)
         # task_results = [task.result for task in finished_tasks]
@@ -248,6 +254,15 @@ class Planner(BaseModel):
         )
 
         return prompt
+
+    def get_finished_tasks(self, current_iter, evaluations: Evaluations):
+        if current_iter > 0:
+            his_tasks = [task for task in self.plan.tasks if task.exp_iteration < current_iter]
+            best_tasks = evaluations.find_best_tasks(his_tasks)
+            finished_tasks = best_tasks + self.plan.get_finished_tasks(iteration=current_iter)
+        else:
+            finished_tasks = self.plan.get_finished_tasks()
+        return finished_tasks
 
     def save_state(self):
         """Save the state of the Planner to a file"""

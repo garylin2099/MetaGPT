@@ -15,9 +15,12 @@ STRUCTUAL_PROMPT = """
 - Ensure the output new code is executable in the same Jupyter notebook as the previous executed code.
 - Always prioritize using pre-defined tools for the same functionality.
 - Print only key variables to guide the following actions, do not output any intermediate logs. Such as set with `verbose=False` or other similar parameters.
+- Don't create any plots.
+- Only Python variables in Finished Tasks can be reused when need. Do not make assumptions.
+- Carefully review all Finished Tasks before coding and avoid duplicate work.
 
 # Output
-While some concise thoughts are helpful, code is absolutely required. Always output one and only one code block in your response. Output code in the following format:
+Always output one and only one code block in your response. Output code in the following format:
 ```python
 your code
 ```
@@ -66,6 +69,7 @@ Here is an example of debugging with reflection.
 
 [instruction]
 Analyze your previous code and error in [context] step by step, provide me with improved method and code. Remember to follow [context] requirement. Don't forget to write code for steps behind the error step.
+Reuse code before the error line, but add checks to ensure it runs correctly on a second pass in the same Jupyter notebook.
 Output a json following the format:
 ```json
 {{
