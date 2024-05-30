@@ -20,4 +20,11 @@
 
 5.After the fifth step, you will obtain new code samples generated based on insights from different task types, which will be the samples for the second round.
 
+## Note
+1.Need to modify the 'import' statements in the following file: ~/MetaGPT/metagpt/strategy/task_type.py
+
+from metagpt.prompts.task_type import...
+
+from metagpt.prompts.task_type_new import...
+
 
