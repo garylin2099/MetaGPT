@@ -10,6 +10,7 @@ from typing import Optional
 
 from pydantic import field_validator
 
+from metagpt.const import LLM_API_TIMEOUT
 from metagpt.utils.yaml_model import YamlModel
 
 
@@ -29,6 +30,8 @@ class LLMType(Enum):
     DASHSCOPE = "dashscope"  # Aliyun LingJi DashScope
     MOONSHOT = "moonshot"
     MISTRAL = "mistral"
+    YI = "yi"  # lingyiwanwu
+    OPENROUTER = "openrouter"
 
     def __missing__(self, key):
         return self.OPENAI
@@ -73,7 +76,7 @@ class LLMConfig(YamlModel):
     stream: bool = False
     logprobs: Optional[bool] = None  # https://cookbook.openai.com/examples/using_logprobs
     top_logprobs: Optional[int] = None
-    timeout: int = 60
+    timeout: int = 600
 
     # For Network
     proxy: Optional[str] = None
@@ -87,3 +90,8 @@ class LLMConfig(YamlModel):
         if v in ["", None, "YOUR_API_KEY"]:
             raise ValueError("Please set your API key in config2.yaml")
         return v
+
+    @field_validator("timeout")
+    @classmethod
+    def check_timeout(cls, v):
+        return v or LLM_API_TIMEOUT

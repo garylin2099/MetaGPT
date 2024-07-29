@@ -51,7 +51,7 @@ class WriteAnalysisCode(Action):
         )
 
         working_memory = working_memory or []
-        context = process_message([Message(content=structual_prompt, role="user")] + working_memory)
+        context = self.llm.format_msg([Message(content=structual_prompt, role="user")] + working_memory)
 
         # LLM call
         if use_reflection:
