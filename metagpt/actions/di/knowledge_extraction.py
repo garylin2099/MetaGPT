@@ -29,6 +29,14 @@ from metagpt.utils.read_document import NotebookReader
 
 
 class KaggleKnowledgeExtraction(Action):
+    """Extract knowledge from Kaggle solutions.
+
+    Args:
+        n_iter: the number of iterations to run the extraction.
+        n_sample: the number of solutions to sample in each iteration. If set to 0 or negative, no kaggle solutions will be used.
+        max_insights: the maximum number of insights to extract in each iteration.
+        knowledge_path: the path to store the knowledge pool.
+    """
     def __init__(
         self,
         n_iter: int = 5,
