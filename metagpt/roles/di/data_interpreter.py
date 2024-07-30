@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import traceback
 from typing import Literal
 
 from pydantic import Field, model_validator
 
 from metagpt.actions.di.ask_review import ReviewConst
 from metagpt.actions.di.execute_nb_code import ExecuteNbCode
+from metagpt.actions.di.experiment_evaluator import ExperimentEvaluator
 from metagpt.actions.di.write_analysis_code import CheckData, WriteAnalysisCode
 from metagpt.logs import logger
 from metagpt.prompts.di.write_analysis_code import DATA_INFO
 from metagpt.roles import Role
-from metagpt.schema import Message, Task, TaskResult
+from metagpt.schema import Message, Task, TaskResult, EvaluationResult, Evaluations, Plan
+from metagpt.strategy.planner import Planner
 from metagpt.strategy.task_type import TaskType
 from metagpt.tools.tool_recommend import BM25ToolRecommender, ToolRecommender
 from metagpt.utils.common import CodeParser
@@ -31,6 +34,13 @@ Output a json following the format:
 ```
 """
 
+INI_CODE = """import warnings
+import logging
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.ERROR)
+warnings.filterwarnings('ignore')"""
+
 
 class DataInterpreter(Role):
     name: str = "David"
@@ -43,10 +53,27 @@ class DataInterpreter(Role):
     tool_recommender: ToolRecommender = None
     react_mode: Literal["plan_and_act", "react"] = "plan_and_act"
     max_react_loop: int = 10  # used for react mode
+    with_data_info: bool = False
+    plan_with_knowledge: bool = False
+    task_with_knowledge: bool = False
+    optimize_with_knowledge: bool = False
+    knowledge_rerank: bool = False
+    max_optimize_iter: int = 0
+    current_optimize_iter: int = 0
+    evaluations: Evaluations = Field(default_factory=Evaluations, exclude=True)
 
     @model_validator(mode="after")
     def set_plan_and_tool(self) -> "Interpreter":
-        self._set_react_mode(react_mode=self.react_mode, max_react_loop=self.max_react_loop, auto_run=self.auto_run)
+        self._set_react_mode(
+            react_mode=self.react_mode,
+            max_react_loop=self.max_react_loop,
+            auto_run=self.auto_run,
+            plan_with_knowledge=self.plan_with_knowledge,
+            task_with_knowledge=self.task_with_knowledge,
+            optimize_with_knowledge=self.optimize_with_knowledge,
+            with_data_info=self.with_data_info,
+            knowledge_rerank=self.knowledge_rerank,
+        )
         self.use_plan = (
             self.react_mode == "plan_and_act"
         )  # create a flag for convenience, overwrite any passed-in value
@@ -87,16 +114,64 @@ class DataInterpreter(Role):
 
     async def _plan_and_act(self) -> Message:
         try:
-            rsp = await super()._plan_and_act()
-            await self.execute_code.terminate()
+            if not hasattr(self.planner, 'plan') or not self.planner.plan.tasks:
+                await self.execute_code.run(INI_CODE)
+                await super()._plan_and_act()
+                await self._evaluate_experiment()
+                self.current_optimize_iter += 1
+            while self.current_optimize_iter <= self.max_optimize_iter:
+                await self._optimize_and_act(max_retries=3)
+            rsp = self.planner.get_useful_memories()[0]
             return rsp
         except Exception as e:
+            logger.error(f"Experiment {self.current_optimize_iter} failed: {e}")
+            self.planner = Planner.load_state(self.role_id)
+            if self.planner:
+                logger.info("Recovered state, resuming...")
+                return await self._plan_and_act()
+        finally:
             await self.execute_code.terminate()
-            raise e
+
+    async def _evaluate_experiment(self, current_iter: int = 0, thought: str = ""):
+        rsp = await ExperimentEvaluator().run(self.planner.plan, current_iter)
+        rsp["improve_thought"] = thought
+        if rsp["score"]:
+            evaluation_result = EvaluationResult(**rsp)
+            self.evaluations.add_evaluation(evaluation_result)
+
+    async def _optimize_and_act(self, max_retries: int = 3):
+        retries = 0
+        iteration_success = False
+        planner_snapshot = self.planner.model_copy()
+        while retries < max_retries:
+            try:
+                logger.info(f"Optimizing experiment for the {self.current_optimize_iter}th time:")
+                thought = await self.planner.optimize_plan(
+                    iteration=self.current_optimize_iter,
+                    evaluations=self.evaluations
+                )
+                await self._act_on_tasks(current_iter=self.current_optimize_iter)
+                await self._evaluate_experiment(current_iter=self.current_optimize_iter, thought=thought)
+                iteration_success = True
+                self.planner.save_state()
+                logger.info(f"Experiment {self.current_optimize_iter} completed.")
+                break
+            except Exception as e:
+                logger.error(f"Experiment {self.current_optimize_iter} failed: {e} for the {retries}th time.")
+                logger.error(traceback.format_exc())
+                retries += 1
+                self.planner = planner_snapshot
+        if not iteration_success:
+            logger.warning(
+                f"Experiment {self.current_optimize_iter} failed after {max_retries} retries, moving to next iteration."
+            )
+        self.current_optimize_iter += 1
 
     async def _act_on_task(self, current_task: Task) -> TaskResult:
         """Useful in 'plan_and_act' mode. Wrap the output in a TaskResult for review and confirmation."""
         code, result, is_success = await self._write_and_exec_code()
+        delete_lines = ["[Warning]", "Warning:", "[CV]", "[INFO]"]
+        result = "\n".join([line for line in result.split("\n") if not any(dl in line for dl in delete_lines)]).strip()
         task_result = TaskResult(code=code, result=result, is_success=is_success)
         return task_result
 
@@ -105,7 +180,9 @@ class DataInterpreter(Role):
         success = False
 
         # plan info
-        plan_status = self.planner.get_plan_status() if self.use_plan else ""
+        plan_status = self.planner.get_plan_status(
+            self.current_optimize_iter, self.evaluations
+        ) if self.use_plan else ""
 
         # tool info
         if self.tool_recommender:
@@ -118,9 +195,11 @@ class DataInterpreter(Role):
             tool_info = ""
 
         # data info
-        await self._check_data()
+        column_info = await self._check_data()
+        self.planner.column_info = column_info if column_info else self.planner.column_info
 
         while not success and counter < max_retry:
+            logger.info(f"Writing code for the {counter}th time.")
             ### write code ###
             code, cause_by = await self._write_code(counter, plan_status, tool_info)
 
@@ -128,7 +207,7 @@ class DataInterpreter(Role):
 
             ### execute code ###
             result, success = await self.execute_code.run(code)
-            print(result)
+            logger.info(f"Result: /n{result}")
 
             self.working_memory.add(Message(content=result, role="user", cause_by=ExecuteNbCode))
 
@@ -173,16 +252,19 @@ class DataInterpreter(Role):
             not in [
                 TaskType.DATA_PREPROCESS.type_name,
                 TaskType.FEATURE_ENGINEERING.type_name,
+                TaskType.MODEL_PREPROCESS.type_name,
                 TaskType.MODEL_TRAIN.type_name,
             ]
         ):
-            return
+            return ""
         logger.info("Check updated data")
-        code = await CheckData().run(self.planner.plan)
+        code = await CheckData().run(self.planner, self.current_optimize_iter, self.evaluations)
         if not code.strip():
-            return
+            return ""
         result, success = await self.execute_code.run(code)
         if success:
-            print(result)
             data_info = DATA_INFO.format(info=result)
             self.working_memory.add(Message(content=data_info, role="user", cause_by=CheckData))
+            return data_info
+        else:
+            return ""

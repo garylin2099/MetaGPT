@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
+import pickle
 
 from pydantic import BaseModel, Field
 
 from metagpt.actions.di.ask_review import AskReview, ReviewConst
+from metagpt.actions.di.knowledge_extraction import KnowledgeReranker
+from metagpt.actions.di.solution_optimizer import SolutionOptimizer
 from metagpt.actions.di.write_plan import (
     WritePlan,
     precheck_update_plan_from_rsp,
-    update_plan_from_rsp,
+    update_plan_from_rsp, DataPreview,
 )
+from metagpt.const import PLANNER_PATH
 from metagpt.logs import logger
 from metagpt.memory import Memory
-from metagpt.schema import Message, Plan, Task, TaskResult
+from metagpt.schema import Message, Plan, Task, TaskResult, Evaluations
+from metagpt.strategy.knowledge_manager import knowledge_manager, KnowledgeManager
 from metagpt.strategy.task_type import TaskType
 from metagpt.utils.common import remove_comments
 
@@ -43,15 +49,32 @@ PLAN_STATUS = """
 ## Task Guidance
 Write complete code for 'Current Task'. And avoid duplicating code from 'Finished Tasks', such as repeated import of packages, reading data, etc.
 Specifically, {guidance}
+{knowledge_prompt}
+"""
+
+KNOWLEDGE_PROMPT = """
+# Knowledge
+{knowledge}
+Refer to the provided knowledge while coding. It encapsulates best practices and proven strategies derived from similar past tasks.
 """
 
 
 class Planner(BaseModel):
+    role_id: str = ""
     plan: Plan
     working_memory: Memory = Field(
         default_factory=Memory
     )  # memory for working on each task, discarded each time a task is done
     auto_run: bool = False
+    plan_with_knowledge: bool = False
+    task_with_knowledge: bool = False
+    optimize_with_knowledge: bool = False
+    with_data_info: bool = False
+    knowledge_rerank: bool = False
+    knowledge_manager: KnowledgeManager = knowledge_manager
+    knowledge: str = ""
+    data_info: str = ""
+    column_info: str = ""
 
     def __init__(self, goal: str = "", plan: Plan = None, **kwargs):
         plan = plan or Plan(goal=goal)
@@ -71,8 +94,17 @@ class Planner(BaseModel):
 
         plan_confirmed = False
         while not plan_confirmed:
+            if self.with_data_info and not self.data_info:
+                self.data_info = await DataPreview().run(requirement=self.plan.goal)
+            if self.plan_with_knowledge or self.task_with_knowledge or self.optimize_with_knowledge:
+                await self.update_knowledge()
             context = self.get_useful_memories()
-            rsp = await WritePlan().run(context, max_tasks=max_tasks)
+            rsp = await WritePlan().run(
+                context,
+                max_tasks=max_tasks,
+                knowledge=self.knowledge if self.plan_with_knowledge else None,
+                data_info=self.data_info if self.with_data_info else None
+            )
             self.working_memory.add(Message(content=rsp, role="assistant", cause_by=WritePlan))
 
             # precheck plan before asking reviews
@@ -90,7 +122,38 @@ class Planner(BaseModel):
 
         self.working_memory.clear()
 
-    async def process_task_result(self, task_result: TaskResult):
+    async def update_knowledge(self):
+        if not self.knowledge:
+            self.knowledge = self.knowledge_manager.format_knowledge(threshold=4)
+            if self.knowledge_rerank:
+                knowledge = await KnowledgeReranker().run(
+                    requirement=self.plan.goal,
+                    data_info=self.data_info,
+                    max_insights=12
+                )
+                self.knowledge_manager.knowledge_pool = knowledge
+                self.knowledge = '\n'.join([f"- {k.knowledge}" for k in knowledge])
+            logger.info(f"Knowledge Pool: \n{self.knowledge}")
+
+    async def optimize_plan(self, iteration: int, evaluations: Evaluations):
+        thought, new_tasks = await SolutionOptimizer().run(
+            self.plan,
+            self.knowledge,
+            self.column_info,
+            iteration,
+            evaluations
+        )
+        new_tasks = [Task(**task_config) for task_config in new_tasks]
+        new_tasks = [task.model_copy(update={"exp_iteration": iteration}) for task in new_tasks]
+        for task in new_tasks:
+            self.plan.append_task(task)
+        return thought
+
+    async def process_task_result(
+        self,
+        task_result: TaskResult,
+        current_iter: int = 0,
+    ):
         # ask for acceptance, users can other refuse and change tasks in the plan
         review, task_result_confirmed = await self.ask_review(task_result)
 
@@ -104,8 +167,11 @@ class Planner(BaseModel):
             pass  # simply pass, not confirming the result
 
         else:
-            # update plan according to user's feedback and to take on changed tasks
-            await self.update_plan()
+            if current_iter == 0:
+                # update plan according to user's feedback and to take on changed tasks
+                await self.update_plan()
+            else:
+                raise NotImplementedError("Not implemented for current iteration > 0")
 
     async def ask_review(
         self,
@@ -157,16 +223,26 @@ class Planner(BaseModel):
 
         return context_msg + self.working_memory.get()
 
-    def get_plan_status(self) -> str:
+    def get_plan_status(self, current_iter: int = 0, evaluations: Evaluations = None) -> str:
         # prepare components of a plan status
-        finished_tasks = self.plan.get_finished_tasks()
+        finished_tasks = self.get_finished_tasks(current_iter, evaluations)
         code_written = [remove_comments(task.code) for task in finished_tasks]
         code_written = "\n\n".join(code_written)
-        task_results = [task.result for task in finished_tasks]
-        task_results = "\n\n".join(task_results)
+        # task_results = [task.result for task in finished_tasks]
+        # task_results = "\n\n".join(task_results)
+        # only show the result of the last task
+        task_results = finished_tasks[-1].result if finished_tasks else ""
         task_type_name = self.current_task.task_type
         task_type = TaskType.get_type(task_type_name)
         guidance = task_type.guidance if task_type else ""
+        knowledge = ""
+        if self.task_with_knowledge:
+            if task_type == "feature engineering":
+                knowledge = self.knowledge_manager.format_by_category('feature_engineering')
+            elif task_type == "model train":
+                knowledge = self.knowledge_manager.format_by_category('model_development')
+            elif task_type == "model ensemble":
+                knowledge = self.knowledge_manager.format_by_category('model_ensemble')
 
         # combine components in a prompt
         prompt = PLAN_STATUS.format(
@@ -174,6 +250,31 @@ class Planner(BaseModel):
             task_results=task_results,
             current_task=self.current_task.instruction,
             guidance=guidance,
+            knowledge_prompt=KNOWLEDGE_PROMPT.format(knowledge=knowledge) if knowledge else "",
         )
 
         return prompt
+
+    def get_finished_tasks(self, current_iter, evaluations: Evaluations):
+        if current_iter > 0:
+            his_tasks = [task for task in self.plan.tasks if task.exp_iteration < current_iter]
+            best_tasks = evaluations.find_best_tasks(his_tasks)
+            finished_tasks = best_tasks + self.plan.get_finished_tasks(iteration=current_iter)
+        else:
+            finished_tasks = self.plan.get_finished_tasks()
+        return finished_tasks
+
+    def save_state(self):
+        """Save the state of the Planner to a file"""
+        with open(f"{PLANNER_PATH}/planner_state_{self.role_id}.pkl", "wb") as f:
+            pickle.dump(self, f)
+            logger.info(f"Planner state saved to planner_state_{self.role_id}.pkl")
+
+    @classmethod
+    def load_state(cls, role_id):
+        """Load the state of the Planner from a file"""
+        filename = f"{PLANNER_PATH}/planner_state_{role_id}.pkl"
+        if os.path.exists(filename):
+            with open(filename, 'rb') as file:
+                return pickle.load(file)
+        return None
