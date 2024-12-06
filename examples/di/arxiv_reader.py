@@ -5,7 +5,8 @@ from metagpt.roles.di.data_interpreter import DataInterpreter
 
 async def main():
     template = "https://arxiv.org/list/{tag}/pastweek?skip=0&show=300"
-    tags = ["cs.ai", "cs.cl", "cs.lg", "cs.se"]
+    tags = ["cs.AI", "cs.CL", "cs.LG", "cs.SE"]
+
     urls = [template.format(tag=tag) for tag in tags]
     prompt = f"""This is a collection of arxiv urls: '{urls}' .
 Record each article, remove duplicates by title (they may have multiple tags), filter out papers related to 
